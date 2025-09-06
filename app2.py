@@ -10,12 +10,12 @@ from thefuzz import process
 @st.cache_data
 def load_data():
     """
-    Loads the single, pre-processed, and compressed data file.
+    Loads the single, pre-processed, and compressed data file from the local repository.
     """
     try:
         df = pd.read_csv('moodie_movie_data.csv.xz')
 
-        # Safely evaluate string representations of lists
+        # Safely evaluate string representations of lists that were saved
         for col in ['genres', 'cast', 'director']:
             df[col] = df[col].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else [])
         
@@ -30,7 +30,7 @@ def load_data():
         return df, tfidf_matrix, indices
 
     except FileNotFoundError:
-        st.error("Error: `moodie_movie_data.csv.xz` not found. Please download it and place it in your project folder.")
+        st.error("Error: `moodie_movie_data.csv.xz` not found. Please make sure it's in your project folder and uploaded to GitHub.")
         return None, None, None
     except Exception as e:
         st.error(f"An error occurred during data loading: {e}")
