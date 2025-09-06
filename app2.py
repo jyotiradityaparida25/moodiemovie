@@ -179,8 +179,8 @@ def main():
     if st.session_state.run_similar_for:
         title_to_match = st.session_state.run_similar_for
         st.session_state.run_similar_for = None
-        user_msg = {"role": "user", "content": f"Show me movies similar to '{title_to_match}'."}
-        st.session_state.messages.append(user_msg)
+        st.session_state.messages.append({"role": "user", "content": f"Show me movies similar to '{title_to_match}'."})
+        st.chat_message("user").write(f"Show me movies similar to '{title_to_match}'.")
         with st.chat_message("assistant"):
             with st.spinner(f"Finding movies like '{title_to_match}'..."):
                 recs = get_similar_content(title_to_match, df, tfidf_matrix, indices)
@@ -191,6 +191,7 @@ def main():
         st.rerun()
     elif user_input := st.chat_input("What would you like to watch?"):
         st.session_state.messages.append({"role": "user", "content": user_input})
+        st.chat_message("user").write(user_input)
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
                 intent = get_user_intent(user_input, indices.index)
@@ -205,11 +206,15 @@ def main():
                     moods, excluded_genres = predict_moods_from_text(intent['entity'], sentiment_model)
                     recs = get_recommendations_by_mood(moods, df, excluded_genres)
                     message = f"Here are some **{' and '.join(moods)}** movies for you:"
-                display_recs(recs, message, context_key="new_rec")
-                bot_msg = {"role": "assistant", "content": message}
-                if not recs.empty:
+                if recs.empty:
+                    message = "Sorry, I couldn't find any movies that perfectly match that request. Can you try something else?"
+                    st.write(message)
+                    st.session_state.messages.append({"role": "assistant", "content": message})
+                else:
+                    display_recs(recs, message, context_key="new_rec")
+                    bot_msg = {"role": "assistant", "content": message}
                     bot_msg["recommendations"] = recs.to_dict('records')
-                st.session_state.messages.append(bot_msg)
+                    st.session_state.messages.append(bot_msg)
         st.rerun()
 
 if __name__ == "__main__":
