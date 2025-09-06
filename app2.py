@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import time
 import ast
 import re
 from transformers import pipeline
@@ -7,79 +8,113 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from thefuzz import process
 
+POSTER_BASE_URL = "https://image.tmdb.org/t/p/w500"
+
 @st.cache_data
-def load_data():
+def load_and_prepare_data():
     try:
-        df = pd.read_csv('moodie_movie_data.csv.xz')
-        for col in ['genres', 'cast', 'director']:
-            df[col] = df[col].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else [])
+        meta_df = pd.read_csv('movies_metadata.csv', low_memory=False)
+        credits_df = pd.read_csv('credits.csv')
+        meta_df = meta_df[meta_df['id'].str.isnumeric()]
+        meta_df['id'] = meta_df['id'].astype(int)
+        meta_df['vote_count'] = pd.to_numeric(meta_df['vote_count'], errors='coerce').fillna(0)
+        df_full = pd.merge(meta_df, credits_df, on='id')
+        df = df_full[df_full['vote_count'] >= 100].copy() 
+
+        def safe_literal_eval(s):
+            try: return ast.literal_eval(s)
+            except: return []
+
+        df['genres'] = df['genres'].apply(lambda x: [i['name'] for i in safe_literal_eval(x)])
+        df['cast'] = df['cast'].apply(lambda x: [i['name'] for i in safe_literal_eval(x)[:3]])
+
+        def get_director(crew):
+            for member in safe_literal_eval(crew):
+                if member['job'] == 'Director':
+                    return [member['name']]
+            return []
+        df['director'] = df['crew'].apply(get_director)
+
+        df = df[['id', 'title', 'overview', 'genres', 'cast', 'director', 'poster_path', 'vote_average', 'vote_count']]
         df['overview'] = df['overview'].fillna('')
+        df.dropna(subset=['title', 'poster_path'], inplace=True)
         df['soup'] = df.apply(lambda x: ' '.join(x['genres']) + ' ' + ' '.join(x['cast']) + ' ' + ' '.join(x['director']) + ' ' + x['overview'], axis=1)
+
         tfidf = TfidfVectorizer(stop_words='english')
         tfidf_matrix = tfidf.fit_transform(df['soup']).astype('float32')
         indices = pd.Series(df.index, index=df['title'])
+
         return df, tfidf_matrix, indices
-    except FileNotFoundError:
-        st.error("Error: `moodie_movie_data.csv.xz` not found. Please make sure it's in your project folder and uploaded to GitHub.")
+
+    except FileNotFoundError as e:
+        st.error(f"Error: A required data file was not found. Please check for `{e.filename}`.")
         return None, None, None
     except Exception as e:
         st.error(f"An error occurred during data loading: {e}")
         return None, None, None
 
 @st.cache_resource
-def get_model():
+def load_sentiment_model():
     return pipeline("sentiment-analysis", model="distilbert-base-uncased-finetuned-sst-2-english")
 
-def get_user_intent(query, movie_titles):
+def get_intent(query, movie_titles):
     query_lower = query.lower()
     match, score = process.extractOne(query, movie_titles)
     if score > 85:
-        return {'type': 'title', 'entity': match}
-    person_keywords = ['starring', 'with', 'actor', 'actress', 'directed by', 'director', 'featuring', 'movies with', 'films with', 'movies starring']
+        return {'type': 'title_search', 'entity': match}
+    person_keywords = ['starring', 'with', 'actor', 'actress', 'directed by', 'director']
     if any(keyword in query_lower for keyword in person_keywords):
         entity = re.sub('|'.join(person_keywords), '', query_lower, flags=re.IGNORECASE).strip()
-        return {'type': 'person', 'entity': entity.title()}
-    mood_keywords = ['funny', 'comedy', 'romantic', 'love', 'action', 'thriller', 'exciting', 'scary', 'horror', 'sad', 'emotional', 'thoughtful', 'documentary', 'history']
-    if any(word in query_lower for word in mood_keywords):
-        return {'type': 'mood', 'entity': query}
-    return {'type': 'mood', 'entity': query}
+        return {'type': 'person_search', 'entity': entity.title()}
+    return {'type': 'mood_search', 'entity': query}
 
-def predict_moods_from_text(text, model):
+def predict_moods(text, sentiment_pipeline):
     text_lower = text.lower()
+    
+    mood_to_genre = {
+        "happy": {"keywords": ["funny", "happy", "comedy", "lighthearted", "upbeat"], "genres": ["Comedy"]},
+        "romantic": {"keywords": ["love", "romantic", "romance", "date night"], "genres": ["Romance"]},
+        "excited": {"keywords": ["action", "thrill", "adventure", "exciting", "fast-paced"], "genres": ["Action", "Adventure", "Thriller"]},
+        "scared": {"keywords": ["horror", "scary", "spooky", "creepy", "suspenseful"], "genres": ["Horror", "Mystery", "Thriller"]},
+        "thoughtful": {"keywords": ["documentary", "history", "biography", "thoughtful", "intellectual"], "genres": ["Documentary", "History"]},
+        "sad": {"keywords": ["sad", "emotional", "drama", "cry", "melancholy"], "genres": ["Drama"]}
+    }
+
     detected_moods = set()
     excluded_genres = set()
-    mood_map = {
-        "happy": ["funny", "happy", "comedy", "lighthearted", "feel better", "cheerful", "upbeat"],
-        "romantic": ["love", "romantic", "romance"],
-        "excited": ["action", "thrill", "adventure", "thriller", "exciting", "fast-paced"],
-        "scared": ["horror", "scared", "spooky", "mystery", "suspenseful", "creepy"],
-        "thoughtful": ["documentary", "history", "intelligent", "thoughtful", "mind-bending"],
-        "sad": ["sad", "drama", "cry", "emotional", "rough", "bad day", "terrible"]
-    }
-    keyword_to_genre = {
-        "comedy": "Comedy", "romance": "Romance", "action": "Action", "thriller": "Thriller",
-        "horror": "Horror", "mystery": "Mystery", "documentary": "Documentary", "history": "History",
-        "drama": "Drama"
-    }
-    negations = [r'\bnot\b', r'anything but', r'don\'t want', r'without']
-    for keyword, genre in keyword_to_genre.items():
-        if any(re.search(f"{pattern}.*\\b{keyword}\\b", text_lower) for pattern in negations):
-            excluded_genres.add(genre)
-    for mood, keywords in mood_map.items():
-        if any(keyword in text_lower for keyword in keywords):
+    
+    negation_patterns = [r'\bnot\b', r'\bbut not\b', r'anything but', r'don\'t want', r'without']
+
+    # First, detect negated genres
+    for mood, data in mood_to_genre.items():
+        for keyword in data["keywords"]:
+            if any(re.search(f"{pattern}.*\\b{keyword}\\b", text_lower) for pattern in negation_patterns):
+                for genre in data["genres"]:
+                    excluded_genres.add(genre)
+
+    # Then, detect desired moods
+    for mood, data in mood_to_genre.items():
+        if any(keyword in text_lower for keyword in data["keywords"]):
             detected_moods.add(mood)
-    final_moods = list(detected_moods)
+
+    final_moods = [m for m in detected_moods if m not in [k for k,v in mood_to_genre.items() if any(g in excluded_genres for g in v['genres'])]]
+
     if not final_moods:
-        final_moods = ['happy'] if model(text)[0]['label'] == 'POSITIVE' else ['sad']
+        sentiment = sentiment_pipeline(text)[0]['label']
+        if sentiment == 'POSITIVE':
+            final_moods = ['happy']
+        elif sentiment == 'NEGATIVE':
+            final_moods = ['sad']
+
     return final_moods, list(excluded_genres)
 
-def get_recommendations_by_mood(moods, df, excluded_genres=None):
-    genre_map = {
-        "happy": ["Comedy", "Romance"], "excited": ["Action", "Thriller"], "sad": ["Drama"],
+def get_mood_recommendations(moods, df, excluded_genres):
+    mood_to_genre = {
+        "happy": ["Comedy", "Romance"], "excited": ["Action", "Adventure", "Thriller"], "sad": ["Drama"],
         "scared": ["Horror", "Mystery"], "romantic": ["Romance"], "thoughtful": ["Documentary", "History"]
     }
-    required_genres = set(g for m in moods for g in genre_map.get(m, []))
-    forbidden_genres = set(excluded_genres) if excluded_genres else set()
+    required_genres = set(g for m in moods for g in mood_to_genre.get(m, []))
+    forbidden_genres = set(excluded_genres)
     
     if not required_genres:
         return pd.DataFrame()
@@ -90,29 +125,28 @@ def get_recommendations_by_mood(moods, df, excluded_genres=None):
     ]
     return recs.nlargest(3, 'vote_count')
 
-def get_recommendations_by_person(name, df):
-    names_lower = [n.strip().lower() for n in name.split(',')]
-    is_actor = df['cast'].apply(lambda x: any(n in [a.lower() for a in x] for n in names_lower))
-    is_director = df['director'].apply(lambda x: any(n in [d.lower() for d in x] for n in names_lower))
+def get_person_recommendations(person_name, df):
+    person_name_lower = person_name.lower()
+    is_actor = df['cast'].apply(lambda x: person_name_lower in [actor.lower() for actor in x])
+    is_director = df['director'].apply(lambda x: person_name_lower in [director.lower() for director in x])
     recs = df[is_actor | is_director]
     return recs.nlargest(5, 'vote_count')
 
-def get_similar_content(title, df, matrix, indices):
+def get_content_recommendations(title, df, tfidf_matrix, indices):
     if title not in indices.index: 
         return pd.DataFrame()
-    
-    lookup = indices[title]
-    idx = lookup.iloc[0] if isinstance(lookup, pd.Series) else lookup
-    
-    if idx >= matrix.shape[0]: return pd.DataFrame()
-    
-    sim_scores = cosine_similarity(matrix[idx], matrix)
-    sim_scores = sorted(list(enumerate(sim_scores[0])), key=lambda x: x[1], reverse=True)[1:6]
+    lookup_result = indices[title]
+    idx = lookup_result.iloc[0] if isinstance(lookup_result, pd.Series) else lookup_result
+    if idx >= tfidf_matrix.shape[0]: return pd.DataFrame()
+    movie_vector = tfidf_matrix[idx]
+    sim_scores = cosine_similarity(movie_vector, tfidf_matrix)
+    sim_scores = list(enumerate(sim_scores[0]))
+    sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)[1:6]
     movie_indices = [i[0] for i in sim_scores]
     return df.iloc[movie_indices]
 
-def setup_page():
-    st.set_page_config(page_title="MoodieMovie", page_icon="🤖", layout="wide")
+def setup_page_config_and_styles():
+    st.set_page_config(page_title="CineBot AI", page_icon="🤖", layout="wide")
     st.markdown("""
         <style>
             .stApp { background-color: #1a1a2e; color: #e0e0e0; }
@@ -122,12 +156,12 @@ def setup_page():
         </style>
     """, unsafe_allow_html=True)
 
-def display_recs(recs, message="", context_key=""):
-    if recs.empty:
-        st.warning("Sorry, I couldn't find any movies that perfectly match that request.")
+def display_movies(movies_df, message=""):
+    if movies_df.empty:
+        st.warning("Sorry, I couldn't find any movies that fit that request.")
         return
     st.subheader(message)
-    for i, (_, movie) in enumerate(recs.iterrows()):
+    for _, movie in movies_df.iterrows():
         with st.expander(f"**{movie['title']}**"):
             col1, col2 = st.columns([1, 2])
             with col1:
@@ -138,80 +172,80 @@ def display_recs(recs, message="", context_key=""):
             with col2:
                 st.markdown("**Overview:**")
                 st.write(movie['overview'])
-                if st.button("More like this", key=f"{context_key}_{i}_{movie['id']}"):
-                    st.session_state.run_similar_for = movie['title']
+                if st.button("More like this", key=f"more_{movie['id']}"):
+                    st.session_state.run_more_like_this = movie['title']
+                    st.rerun()
 
 def main():
-    setup_page()
+    setup_page_config_and_styles()
     st.title("🤖 MoodieMovie")
-    df, tfidf_matrix, indices = load_data()
-    if df is None:
-        st.stop()
-    sentiment_model = get_model()
+    df, tfidf_matrix, indices = load_and_prepare_data()
+    if df is None: return
+    sentiment_pipeline = load_sentiment_model()
     if 'messages' not in st.session_state:
-        st.session_state.messages = [{"role": "assistant", "content": "Hi! How are you feeling, or what are you looking for?"}]
-    if 'run_similar_for' not in st.session_state:
-        st.session_state.run_similar_for = None
+        st.session_state.messages = [{"role": "assistant", "content": "Hi! Ask me for a movie by title, mood, or person."}]
+    if 'run_more_like_this' not in st.session_state:
+        st.session_state.run_more_like_this = None
     with st.sidebar:
-        st.title("About MoodieMovie")
-        if df is not None:
+        st.title("About CineBot AI")
+        if not df.empty:
             st.write(f"Loaded **{df['title'].nunique()}** unique movies.")
         if st.button("Clear Conversation"):
-            st.session_state.messages = [{"role": "assistant", "content": "Hi! How are you feeling, or what are you looking for?"}]
-            st.session_state.run_similar_for = None
+            st.session_state.messages = [{"role": "assistant", "content": "Hi! Ask me for a movie by title, mood, or person."}]
             st.rerun()
-        with st.expander("📖 How to Use"):
+        with st.expander("📖 How to Use CineBot AI"):
             st.markdown("""
+            This chatbot can understand three different types of requests:
+
             **1. Search by Mood**
-            - *"I want a funny movie"*
-            - *"a thriller but not horror"*
-            **2. Search by Title/Person**
-            - *"The Dark Knight"*
-            - *"movies starring Tom Hanks"*
-            **3. Discover Similar Movies**
-            Click the **"More like this"** button.
+            Describe a feeling or genre. You can even use negations!
+            - *e.g., "I want to watch a funny movie"*
+            - *e.g., "a thriller but not horror"*
+            
+            **2. Discover Similar Movies**
+            After getting a recommendation, click the **"More like this"** button to find movies with a similar theme and style.
             """)
-    for i, msg in enumerate(st.session_state.messages):
+    for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.write(msg["content"])
             if "recommendations" in msg:
-                display_recs(pd.DataFrame(msg["recommendations"]), context_key=f"msg_{i}")
-    if st.session_state.run_similar_for:
-        title_to_match = st.session_state.run_similar_for
-        st.session_state.run_similar_for = None
-        st.session_state.messages.append({"role": "user", "content": f"Show me movies similar to '{title_to_match}'."})
-        st.chat_message("user").write(f"Show me movies similar to '{title_to_match}'.")
+                display_movies(pd.DataFrame(msg["recommendations"]))
+    if st.session_state.run_more_like_this:
+        title_to_match = st.session_state.run_more_like_this
+        st.session_state.run_more_like_this = None
+        user_msg = f"Show me movies similar to '{title_to_match}'."
+        st.session_state.messages.append({"role": "user", "content": user_msg})
         with st.chat_message("assistant"):
             with st.spinner(f"Finding movies like '{title_to_match}'..."):
-                recs = get_similar_content(title_to_match, df, tfidf_matrix, indices)
-                message = f"If you liked **{title_to_match}**, you might also like:"
-                display_recs(recs, message, context_key="similar_rec")
+                recs = get_content_recommendations(title_to_match, df, tfidf_matrix, indices)
+                message = f"If you liked {title_to_match}, you might also like:"
+                display_movies(recs, message)
                 bot_msg = {"role": "assistant", "content": message, "recommendations": recs.to_dict('records')}
                 st.session_state.messages.append(bot_msg)
         st.rerun()
-    elif user_input := st.chat_input("What would you like to watch?"):
+    user_input = st.chat_input("What would you like to watch?")
+    if user_input:
         st.session_state.messages.append({"role": "user", "content": user_input})
         st.chat_message("user").write(user_input)
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
-                intent = get_user_intent(user_input, indices.index)
-                recs, message = pd.DataFrame(), ""
-                if intent['type'] == 'title':
-                    recs = df[df['title'] == intent['entity']]
+                intent = get_intent(user_input, indices.index)
+                recs_df, message = pd.DataFrame(), ""
+                if intent['type'] == 'title_search':
+                    recs_df = df[df['title'] == intent['entity']]
                     message = f"Here are the details for **{intent['entity']}**:"
-                elif intent['type'] == 'person':
-                    recs = get_recommendations_by_person(intent['entity'], df)
-                    message = f"Top movies featuring **{intent['entity']}**:"
-                elif intent['type'] == 'mood':
-                    moods, excluded_genres = predict_moods_from_text(intent['entity'], sentiment_model)
-                    recs = get_recommendations_by_mood(moods, df, excluded_genres)
+                elif intent['type'] == 'person_search':
+                    recs_df = get_person_recommendations(intent['entity'], df)
+                    message = f"Top-rated movies featuring **{intent['entity']}**:"
+                elif intent['type'] == 'mood_search':
+                    moods, excluded_genres = predict_moods(intent['entity'], sentiment_pipeline)
+                    recs_df = get_mood_recommendations(moods, df, excluded_genres)
                     message = f"Here are some **{' and '.join(moods)}** movies for you:"
-                if recs.empty:
-                    message = "Sorry, I couldn't find any movies that perfectly match that request. Can you try something else?"
-                    st.write(message)
-                    st.session_state.messages.append({"role": "assistant", "content": message})
-                else:
-                    display_recs(recs, message, context_key="new_rec")
-                    bot_msg = {"role": "assistant", "content": message}
-                    bot_msg["recommendations"] = recs.to_dict('records')
-                    st.session_state.messages.append(bot_msg)
+                display_movies(recs_df, message)
+                bot_msg = {"role": "assistant", "content": message}
+                if not recs_df.empty:
+                    bot_msg["recommendations"] = recs_df.to_dict('records')
+                st.session_state.messages.append(bot_msg)
+
+if __name__ == "__main__":
+    main()
