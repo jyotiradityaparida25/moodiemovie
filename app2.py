@@ -3,7 +3,6 @@ import pandas as pd
 import time
 import ast
 import re
-import gdown
 import os
 from transformers import pipeline
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -13,40 +12,37 @@ from thefuzz import process
 POSTER_BASE_URL = "https://image.tmdb.org/t/p/w500"
 
 @st.cache_data
-def load_data():
+def load_and_prepare_data():
     """
-    Downloads a raw-filtered data file from Google Drive and performs the
-    final processing steps (feature engineering) within the app.
+    Loads and merges compressed data files directly from the repository.
     """
     try:
-        # --- This section now downloads the raw data file from your new link ---
-        file_id = "1r8xXEnJyvBNYQJvM9f97j825kbw27bz2" # Your NEW Google Drive File ID
-        file_name = "processed_movies_raw.csv"
-        
-        if not os.path.exists(file_name):
-            with st.spinner(f"Downloading data file ({file_name})... This may take a moment on the first run."):
-                gdown.download(id=file_id, output=file_name, quiet=False)
-        
-        # Now, load the locally downloaded file
-        df = pd.read_csv(file_name)
+        # --- CHANGE: Load the compressed .gz files ---
+        meta_df = pd.read_csv('movies_metadata.csv.gz', compression='gzip', low_memory=False)
+        credits_df = pd.read_csv('credits.csv.gz', compression='gzip')
 
-        # --- MOVED: The processing logic is now inside the main app ---
-        def safe_eval(s):
+        # --- The rest of the function is exactly the same ---
+        meta_df = meta_df[meta_df['id'].str.isnumeric()]
+        meta_df['id'] = meta_df['id'].astype(int)
+        
+        meta_df['vote_count'] = pd.to_numeric(meta_df['vote_count'], errors='coerce').fillna(0)
+        df_full = pd.merge(meta_df, credits_df, on='id')
+        df = df_full[df_full['vote_count'] >= 100].copy() 
+
+        def safe_literal_eval(s):
             try: return ast.literal_eval(s)
             except: return []
 
-        df['genres'] = df['genres'].apply(lambda x: [i['name'] for i in safe_eval(x)])
-        df['cast'] = df['cast'].apply(lambda x: [i['name'] for i in safe_eval(x)[:3]])
+        df['genres'] = df['genres'].apply(lambda x: [i['name'] for i in safe_literal_eval(x)])
+        df['cast'] = df['cast'].apply(lambda x: [i['name'] for i in safe_literal_eval(x)[:3]])
 
-        def get_director(crew_data):
-            # crew_data is now read from the 'crew' column in the raw CSV
-            for member in safe_eval(crew_data):
+        def get_director(crew):
+            for member in safe_literal_eval(crew):
                 if member['job'] == 'Director':
                     return [member['name']]
             return []
         df['director'] = df['crew'].apply(get_director)
 
-        # --- The rest of the function continues as before ---
         df = df[['id', 'title', 'overview', 'genres', 'cast', 'director', 'poster_path', 'vote_average', 'vote_count']]
         df['overview'] = df['overview'].fillna('')
         df.dropna(subset=['title', 'poster_path'], inplace=True)
@@ -60,6 +56,9 @@ def load_data():
 
         return df, tfidf_matrix, indices
 
+    except FileNotFoundError as e:
+        st.error(f"Error: A required data file was not found. Please check for `{e.filename}` in your repo.")
+        return None, None, None
     except Exception as e:
         st.error(f"An error occurred during data loading: {e}")
         return None, None, None
@@ -179,7 +178,7 @@ def display_recs(recs, message=""):
 setup_page()
 st.title("🤖 MoodieMovie")
 
-df, tfidf_matrix, indices = load_data()
+df, tfidf_matrix, indices = load_and_prepare_data()
 if df is None:
     st.stop()
 sentiment_model = get_model()
@@ -202,10 +201,8 @@ with st.sidebar:
         **1. Search by Mood**
         - *"I want a funny movie"*
         - *"a thriller but not horror"*
-        **2. Search by Title/Person**
-        - *"The Dark Knight"*
-        - *"movies starring Tom Hanks"*
-        **3. Discover Similar Movies**
+        
+        **2. Discover Similar Movies**
         Click the **"More like this"** button on any movie.
         """)
 
