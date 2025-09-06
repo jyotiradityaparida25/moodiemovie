@@ -215,7 +215,3 @@ def main():
                     bot_msg = {"role": "assistant", "content": message}
                     bot_msg["recommendations"] = recs.to_dict('records')
                     st.session_state.messages.append(bot_msg)
-        st.rerun()
-
-if __name__ == "__main__":
-    main()
