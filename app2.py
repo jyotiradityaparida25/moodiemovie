@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import time
 import ast
 import re
 from transformers import pipeline
@@ -7,30 +8,22 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from thefuzz import process
 
+POSTER_BASE_URL = "https://image.tmdb.org/t/p/w500"
+
 @st.cache_data
 def load_data():
-    """
-    Loads the single, pre-processed, and compressed data file from the local repository.
-    """
     try:
         df = pd.read_csv('moodie_movie_data.csv.xz')
-
-        # Safely evaluate string representations of lists that were saved
         for col in ['genres', 'cast', 'director']:
             df[col] = df[col].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else [])
-        
         df['overview'] = df['overview'].fillna('')
         df['soup'] = df.apply(lambda x: ' '.join(x['genres']) + ' ' + ' '.join(x['cast']) + ' ' + ' '.join(x['director']) + ' ' + x['overview'], axis=1)
-
         tfidf = TfidfVectorizer(stop_words='english')
         tfidf_matrix = tfidf.fit_transform(df['soup']).astype('float32')
-        
         indices = pd.Series(df.index, index=df['title'])
-
         return df, tfidf_matrix, indices
-
     except FileNotFoundError:
-        st.error("Error: `moodie_movie_data.csv.xz` not found. Please make sure it's in your project folder and uploaded to GitHub.")
+        st.error("Error: `moodie_movie_data.csv.xz` not found. Please ensure it's in your project folder.")
         return None, None, None
     except Exception as e:
         st.error(f"An error occurred during data loading: {e}")
@@ -42,43 +35,32 @@ def get_model():
 
 def get_user_intent(query, movie_titles):
     query_lower = query.lower()
-    
     match, score = process.extractOne(query, movie_titles)
     if score > 85:
         return {'type': 'title', 'entity': match}
-
     person_keywords = ['starring', 'with', 'actor', 'actress', 'directed by', 'director']
     if any(keyword in query_lower for keyword in person_keywords):
         entity = re.sub('|'.join(person_keywords), '', query_lower, flags=re.IGNORECASE).strip()
         return {'type': 'person', 'entity': entity.title()}
-    
     return {'type': 'mood', 'entity': query}
 
 def predict_moods_from_text(text, model):
     text_lower = text.lower()
     detected = set()
     mood_map = {
-        "happy": ["funny", "happy", "feel better", "lighthearted"],
-        "romantic": ["love", "romantic"],
-        "excited": ["action", "thrill", "adventure"],
-        "scared": ["horror", "scared", "spooky"],
-        "thoughtful": ["documentary", "history", "intelligent"],
-        "sad": ["sad", "drama", "cry"]
+        "happy": ["funny", "happy"], "romantic": ["love", "romantic"], "excited": ["action", "thrill"],
+        "scared": ["horror", "scared"], "thoughtful": ["documentary", "history"], "sad": ["sad", "drama"]
     }
     negations = [r'\bnot\b', r'anything but', r'don\'t want', r'without']
-    
     excluded = set()
     for mood, keywords in mood_map.items():
         for keyword in keywords:
             if any(re.search(f"{pattern}.*\\b{keyword}\\b", text_lower) for pattern in negations):
                 excluded.add(mood)
-
     for mood, keywords in mood_map.items():
         if any(keyword in text_lower for keyword in keywords):
             detected.add(mood)
-
     final_moods = list(detected - excluded)
-    
     if not final_moods:
         return ['happy'] if model(text)[0]['label'] == 'POSITIVE' else ['sad']
     return final_moods
@@ -104,15 +86,11 @@ def get_recommendations_by_person(name, df):
 def get_similar_content(title, df, matrix, indices):
     if title not in indices: 
         return pd.DataFrame()
-    
     lookup = indices[title]
     idx = lookup.iloc[0] if isinstance(lookup, pd.Series) else lookup
-
     if idx >= matrix.shape[0]: return pd.DataFrame()
-        
     sim_scores = cosine_similarity(matrix[idx], matrix)
     sim_scores = sorted(list(enumerate(sim_scores[0])), key=lambda x: x[1], reverse=True)[1:6]
-    
     movie_indices = [i[0] for i in sim_scores]
     return df.iloc[movie_indices]
 
@@ -127,7 +105,8 @@ def setup_page():
         </style>
     """, unsafe_allow_html=True)
 
-def display_recs(recs, message=""):
+# --- FIX 1: Add a 'context_key' parameter to the display function ---
+def display_recs(recs, message="", context_key=""):
     if recs.empty:
         st.warning("Sorry, couldn't find any movies for that.")
         return
@@ -144,7 +123,8 @@ def display_recs(recs, message=""):
             with col2:
                 st.markdown("**Overview:**")
                 st.write(movie['overview'])
-                if st.button("More like this", key=f"more_{movie['id']}"):
+                # --- FIX 2: Add the context_key prefix to the button key ---
+                if st.button("More like this", key=f"{context_key}_more_{movie['id']}"):
                     st.session_state.run_similar = movie['title']
                     st.rerun()
 
@@ -181,11 +161,13 @@ with st.sidebar:
         Click the **"More like this"** button on any movie.
         """)
 
-for msg in st.session_state.messages:
+# --- FIX 3: Use enumerate to get the index of each message ---
+for i, msg in enumerate(st.session_state.messages):
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
         if "recommendations" in msg:
-            display_recs(pd.DataFrame(msg["recommendations"]))
+            # --- FIX 4: Pass the message index as part of the context_key ---
+            display_recs(pd.DataFrame(msg["recommendations"]), context_key=f"msg_{i}")
 
 if st.session_state.run_similar:
     similar_to_title = st.session_state.run_similar
@@ -193,21 +175,13 @@ if st.session_state.run_similar:
     
     st.session_state.messages.append({"role": "user", "content": f"Show me movies like '{similar_to_title}'."})
     
-    with st.chat_message("assistant"):
-        with st.spinner(f"Finding movies like '{similar_to_title}'..."):
-            recs = get_similar_content(similar_to_title, df, tfidf_matrix, indices)
-            message = f"If you liked {similar_to_title}, you might also like:"
-            display_recs(recs, message)
-            
-            bot_msg = {"role": "assistant", "content": message, "recommendations": recs.to_dict('records')}
-            st.session_state.messages.append(bot_msg)
+    # Rerun to display the user message immediately
     st.rerun()
 
 user_input = st.chat_input("What would you like to watch?")
 if user_input:
     st.session_state.messages.append({"role": "user", "content": user_input})
-    st.chat_message("user").write(user_input)
-
+    
     with st.chat_message("assistant"):
         with st.spinner("Thinking..."):
             intent = get_user_intent(user_input, indices.index)
@@ -225,9 +199,13 @@ if user_input:
                 recs = get_recommendations_by_mood(moods, df)
                 message = f"Here are some **{' and '.join(moods)}** movies for you:"
 
-            display_recs(recs, message)
+            # --- FIX 5: Use a unique context for newly generated recommendations ---
+            display_recs(recs, message, context_key="new_rec")
             
             bot_msg = {"role": "assistant", "content": message}
             if not recs.empty:
                 bot_msg["recommendations"] = recs.to_dict('records')
             st.session_state.messages.append(bot_msg)
+    
+    # Rerun to clear the "More like this" state if necessary and show the new message
+    st.rerun()
