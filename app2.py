@@ -46,16 +46,16 @@ def get_user_intent(query, movie_titles):
 
 def predict_moods_from_text(text, model):
     text_lower = text.lower()
-    detected = set()
+    detected_moods = set()
     excluded_genres = set()
     
     mood_map = {
-        "happy": ["funny", "happy", "comedy", "lighthearted", "feel better"],
+        "happy": ["funny", "happy", "comedy", "lighthearted", "feel better", "cheerful", "upbeat"],
         "romantic": ["love", "romantic", "romance"],
-        "excited": ["action", "thrill", "adventure", "thriller"],
-        "scared": ["horror", "scared", "spooky", "mystery"],
-        "thoughtful": ["documentary", "history", "intelligent", "thoughtful"],
-        "sad": ["sad", "drama", "cry", "emotional"]
+        "excited": ["action", "thrill", "adventure", "thriller", "exciting", "fast-paced"],
+        "scared": ["horror", "scared", "spooky", "mystery", "suspenseful", "creepy"],
+        "thoughtful": ["documentary", "history", "intelligent", "thoughtful", "mind-bending"],
+        "sad": ["sad", "drama", "cry", "emotional", "rough", "bad day", "terrible"]
     }
     
     keyword_to_genre = {
@@ -66,17 +66,19 @@ def predict_moods_from_text(text, model):
     
     negations = [r'\bnot\b', r'anything but', r'don\'t want', r'without']
     
-    # First, find which specific genres to exclude
+    # First, find which specific genres to exclude from the recommendations
     for keyword, genre in keyword_to_genre.items():
         if any(re.search(f"{pattern}.*\\b{keyword}\\b", text_lower) for pattern in negations):
             excluded_genres.add(genre)
 
-    # Then, find which moods to include
+    # Then, find which moods to include based on keywords
     for mood, keywords in mood_map.items():
         if any(keyword in text_lower for keyword in keywords):
-            detected.add(mood)
+            detected_moods.add(mood)
 
-    final_moods = list(detected)
+    final_moods = list(detected_moods)
+    
+    # If no keywords were detected from our map, fallback to the generic sentiment model
     if not final_moods:
         final_moods = ['happy'] if model(text)[0]['label'] == 'POSITIVE' else ['sad']
         
@@ -87,16 +89,31 @@ def get_recommendations_by_mood(moods, df, excluded_genres=None):
         "happy": ["Comedy", "Romance"], "excited": ["Action", "Thriller"], "sad": ["Drama"],
         "scared": ["Horror", "Mystery"], "romantic": ["Romance"], "thoughtful": ["Documentary", "History"]
     }
-    target_genres = set(g for m in moods for g in genre_map.get(m, []))
-    if not target_genres: 
-        return pd.DataFrame()
-        
-    # Get all candidate movies that have at least one of the desired genres
-    recs = df[df['genres'].apply(lambda movie_genres: not target_genres.isdisjoint(movie_genres))]
     
-    # Now, filter out any movies that have one of the excluded genres
-    if excluded_genres:
-        recs = recs[recs['genres'].apply(lambda movie_genres: set(movie_genres).isdisjoint(set(excluded_genres)))]
+    # Define which genres we are looking for based on the moods
+    positive_genres = set(g for m in moods for g in genre_map.get(m, []))
+    
+    # Define which genres we must avoid
+    forbidden_genres = set(excluded_genres) if excluded_genres else set()
+
+    # The genres we require must not be in the forbidden list
+    required_genres = positive_genres - forbidden_genres
+
+    if not required_genres:
+        # Handles cases like "action but not thriller" where both map to the same mood.
+        # This correctly results in an empty search.
+        return pd.DataFrame()
+
+    # Filter the dataframe based on the new, precise logic
+    def is_valid_movie(movie_genres):
+        movie_genre_set = set(movie_genres)
+        # 1. The movie MUST have at least one of the genres we want.
+        has_required = not movie_genre_set.isdisjoint(required_genres)
+        # 2. The movie MUST NOT have any of the genres we want to avoid.
+        has_forbidden = not movie_genre_set.isdisjoint(forbidden_genres)
+        return has_required and not has_forbidden
+
+    recs = df[df['genres'].apply(is_valid_movie)]
         
     return recs.nlargest(3, 'vote_count')
 
@@ -131,7 +148,7 @@ def setup_page():
 
 def display_recs(recs, message="", context_key=""):
     if recs.empty:
-        st.warning("Sorry, couldn't find any movies for that.")
+        st.warning("Sorry, I couldn't find any movies that perfectly match that request.")
         return
     st.subheader(message)
     for i, (_, movie) in enumerate(recs.iterrows()):
