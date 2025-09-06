@@ -44,20 +44,30 @@ def get_user_intent(query, movie_titles):
 def predict_moods_from_text(text, model):
     text_lower = text.lower()
     detected = set()
+    
+    # --- FIX: Expanded the keyword list to include genre names ---
     mood_map = {
-        "happy": ["funny", "happy"], "romantic": ["love", "romantic"], "excited": ["action", "thrill"],
-        "scared": ["horror", "scared"], "thoughtful": ["documentary", "history"], "sad": ["sad", "drama"]
+        "happy": ["funny", "happy", "comedy", "lighthearted", "feel better"],
+        "romantic": ["love", "romantic", "romance"],
+        "excited": ["action", "thrill", "adventure", "thriller"],
+        "scared": ["horror", "scared", "spooky", "mystery"],
+        "thoughtful": ["documentary", "history", "intelligent", "thoughtful"],
+        "sad": ["sad", "drama", "cry", "emotional"]
     }
     negations = [r'\bnot\b', r'anything but', r'don\'t want', r'without']
+    
     excluded = set()
     for mood, keywords in mood_map.items():
         for keyword in keywords:
             if any(re.search(f"{pattern}.*\\b{keyword}\\b", text_lower) for pattern in negations):
                 excluded.add(mood)
+
     for mood, keywords in mood_map.items():
         if any(keyword in text_lower for keyword in keywords):
             detected.add(mood)
+
     final_moods = list(detected - excluded)
+    
     if not final_moods:
         return ['happy'] if model(text)[0]['label'] == 'POSITIVE' else ['sad']
     return final_moods
@@ -71,6 +81,13 @@ def get_recommendations_by_mood(moods, df):
     if not target_genres: 
         return pd.DataFrame()
     recs = df[df['genres'].apply(lambda x: not target_genres.isdisjoint(x))]
+    
+    # Exclude genres from opposite moods if possible
+    if "happy" in moods and "scared" not in moods:
+        recs = recs[~recs['genres'].apply(lambda x: 'Horror' in x)]
+    if "scared" in moods and "happy" not in moods:
+        recs = recs[~recs['genres'].apply(lambda x: 'Comedy' in x)]
+        
     return recs.nlargest(3, 'vote_count')
 
 def get_recommendations_by_person(name, df):
@@ -83,11 +100,15 @@ def get_recommendations_by_person(name, df):
 def get_similar_content(title, df, matrix, indices):
     if title not in indices: 
         return pd.DataFrame()
+    
     lookup = indices[title]
     idx = lookup.iloc[0] if isinstance(lookup, pd.Series) else lookup
+
     if idx >= matrix.shape[0]: return pd.DataFrame()
+        
     sim_scores = cosine_similarity(matrix[idx], matrix)
     sim_scores = sorted(list(enumerate(sim_scores[0])), key=lambda x: x[1], reverse=True)[1:6]
+    
     movie_indices = [i[0] for i in sim_scores]
     return df.iloc[movie_indices]
 
@@ -168,19 +189,12 @@ if st.session_state.run_similar:
     st.session_state.run_similar = None
     
     st.session_state.messages.append({"role": "user", "content": f"Show me movies similar to '{title_to_match}'."})
-    
-    with st.chat_message("assistant"):
-        with st.spinner(f"Finding movies like '{title_to_match}'..."):
-            recs = get_similar_content(title_to_match, df, tfidf_matrix, indices)
-            message = f"If you liked {title_to_match}, you might also like:"
-            display_recs(recs, message, context_key="similar_rec")
-            
-            bot_msg = {"role": "assistant", "content": message, "recommendations": recs.to_dict('records')}
-            st.session_state.messages.append(bot_msg)
     st.rerun()
 
 user_input = st.chat_input("What would you like to watch?")
-if user_input:
+
+if user_input and "last_input" not in st.session_state or st.session_state.last_input != user_input:
+    st.session_state.last_input = user_input
     st.session_state.messages.append({"role": "user", "content": user_input})
     
     with st.chat_message("assistant"):
