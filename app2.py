@@ -14,41 +14,34 @@ POSTER_BASE_URL = "https://image.tmdb.org/t/p/w500"
 @st.cache_data
 def load_and_prepare_data():
     """
-    Loads and merges compressed data files directly from the repository.
+    Loads and prepares the TMDb metadata, creating a TF-IDF matrix from genres and overview.
     """
     try:
-        # --- CHANGE: Load the compressed .gz files ---
+        # Load only the metadata dataset
         meta_df = pd.read_csv('movies_metadata.csv.gz', compression='gzip', low_memory=False)
-        credits_df = pd.read_csv('credits.csv.gz', compression='gzip')
 
-        # --- The rest of the function is exactly the same ---
+        # Clean and filter the data
         meta_df = meta_df[meta_df['id'].str.isnumeric()]
         meta_df['id'] = meta_df['id'].astype(int)
         
         meta_df['vote_count'] = pd.to_numeric(meta_df['vote_count'], errors='coerce').fillna(0)
-        df_full = pd.merge(meta_df, credits_df, on='id')
-        df = df_full[df_full['vote_count'] >= 100].copy() 
+        df = meta_df[meta_df['vote_count'] >= 100].copy() 
 
+        # Feature Engineering for Genres
         def safe_literal_eval(s):
             try: return ast.literal_eval(s)
             except: return []
-
         df['genres'] = df['genres'].apply(lambda x: [i['name'] for i in safe_literal_eval(x)])
-        df['cast'] = df['cast'].apply(lambda x: [i['name'] for i in safe_literal_eval(x)[:3]])
-
-        def get_director(crew):
-            for member in safe_literal_eval(crew):
-                if member['job'] == 'Director':
-                    return [member['name']]
-            return []
-        df['director'] = df['crew'].apply(get_director)
-
-        df = df[['id', 'title', 'overview', 'genres', 'cast', 'director', 'poster_path', 'vote_average', 'vote_count']]
+        
+        # Select final columns (no cast or director)
+        df = df[['id', 'title', 'overview', 'genres', 'poster_path', 'vote_average', 'vote_count']]
         df['overview'] = df['overview'].fillna('')
         df.dropna(subset=['title', 'poster_path'], inplace=True)
 
-        df['soup'] = df.apply(lambda x: ' '.join(x['genres']) + ' ' + ' '.join(x['cast']) + ' ' + ' '.join(x['director']) + ' ' + x['overview'], axis=1)
+        # Create a "soup" from only genres and overview
+        df['soup'] = df.apply(lambda x: ' '.join(x['genres']) + ' ' + x['overview'], axis=1)
 
+        # NLP Model Training (TF-IDF)
         tfidf = TfidfVectorizer(stop_words='english')
         tfidf_matrix = tfidf.fit_transform(df['soup']).astype('float32')
         
@@ -68,17 +61,15 @@ def get_model():
     return pipeline("sentiment-analysis", model="distilbert-base-uncased-finetuned-sst-2-english")
 
 def get_user_intent(query, movie_titles):
+    """Classifies user intent as either title or mood search."""
     query_lower = query.lower()
     
+    # Check for a direct title match
     match, score = process.extractOne(query, movie_titles)
     if score > 85:
         return {'type': 'title', 'entity': match}
 
-    person_keywords = ['starring', 'with', 'actor', 'actress', 'directed by', 'director']
-    if any(keyword in query_lower for keyword in person_keywords):
-        entity = re.sub('|'.join(person_keywords), '', query_lower, flags=re.IGNORECASE).strip()
-        return {'type': 'person', 'entity': entity.title()}
-    
+    # If not a title, it's a mood search
     return {'type': 'mood', 'entity': query}
 
 def predict_moods_from_text(text, model):
@@ -121,13 +112,6 @@ def get_recommendations_by_mood(moods, df):
     recs = df[df['genres'].apply(lambda x: not target_genres.isdisjoint(x))]
     return recs.nlargest(3, 'vote_count')
 
-def get_recommendations_by_person(name, df):
-    name_lower = name.lower()
-    is_actor = df['cast'].apply(lambda x: name_lower in [a.lower() for a in x])
-    is_director = df['director'].apply(lambda x: name_lower in [d.lower() for d in x])
-    recs = df[is_actor | is_director]
-    return recs.nlargest(5, 'vote_count')
-
 def get_similar_content(title, df, matrix, indices):
     if title not in indices: 
         return pd.DataFrame()
@@ -166,8 +150,6 @@ def display_recs(recs, message=""):
             with col1:
                 st.markdown(f"**Rating:** ⭐ {movie['vote_average']:.1f}/10 ({int(movie['vote_count'])} votes)")
                 st.markdown(f"**Genres:** {', '.join(movie['genres'])}")
-                if movie['director']: st.markdown(f"**Director:** {', '.join(movie['director'])}")
-                if movie['cast']: st.markdown(f"**Cast:** {', '.join(movie['cast'])}")
             with col2:
                 st.markdown("**Overview:**")
                 st.write(movie['overview'])
@@ -201,8 +183,9 @@ with st.sidebar:
         **1. Search by Mood**
         - *"I want a funny movie"*
         - *"a thriller but not horror"*
-        
-        **2. Discover Similar Movies**
+        **2. Search by Title**
+        - *"The Dark Knight"*
+        **3. Discover Similar Movies**
         Click the **"More like this"** button on any movie.
         """)
 
@@ -242,9 +225,6 @@ if user_input:
             if intent['type'] == 'title':
                 recs = df[df['title'] == intent['entity']]
                 message = f"Here are the details for **{intent['entity']}**:"
-            elif intent['type'] == 'person':
-                recs = get_recommendations_by_person(intent['entity'], df)
-                message = f"Top movies featuring **{intent['entity']}**:"
             elif intent['type'] == 'mood':
                 moods = predict_moods_from_text(intent['entity'], sentiment_model)
                 recs = get_recommendations_by_mood(moods, df)
