@@ -1,5 +1,7 @@
 streamlit
 pandas
-scikit-learn
 transformers
 torch
+scikit-learn
+thefuzz
+python-levenshtein
