@@ -47,6 +47,8 @@ def get_user_intent(query, movie_titles):
 def predict_moods_from_text(text, model):
     text_lower = text.lower()
     detected = set()
+    excluded_genres = set()
+    
     mood_map = {
         "happy": ["funny", "happy", "comedy", "lighthearted", "feel better"],
         "romantic": ["love", "romantic", "romance"],
@@ -55,23 +57,32 @@ def predict_moods_from_text(text, model):
         "thoughtful": ["documentary", "history", "intelligent", "thoughtful"],
         "sad": ["sad", "drama", "cry", "emotional"]
     }
+    
+    keyword_to_genre = {
+        "comedy": "Comedy", "romance": "Romance", "action": "Action", "thriller": "Thriller",
+        "horror": "Horror", "mystery": "Mystery", "documentary": "Documentary", "history": "History",
+        "drama": "Drama"
+    }
+    
     negations = [r'\bnot\b', r'anything but', r'don\'t want', r'without']
     
-    excluded = set()
-    for mood, keywords in mood_map.items():
-        for keyword in keywords:
-            if any(re.search(f"{pattern}.*\\b{keyword}\\b", text_lower) for pattern in negations):
-                excluded.add(mood)
+    # First, find which specific genres to exclude
+    for keyword, genre in keyword_to_genre.items():
+        if any(re.search(f"{pattern}.*\\b{keyword}\\b", text_lower) for pattern in negations):
+            excluded_genres.add(genre)
 
+    # Then, find which moods to include
     for mood, keywords in mood_map.items():
         if any(keyword in text_lower for keyword in keywords):
             detected.add(mood)
-    final_moods = list(detected - excluded)
-    if not final_moods:
-        return ['happy'] if model(text)[0]['label'] == 'POSITIVE' else ['sad']
-    return final_moods
 
-def get_recommendations_by_mood(moods, df):
+    final_moods = list(detected)
+    if not final_moods:
+        final_moods = ['happy'] if model(text)[0]['label'] == 'POSITIVE' else ['sad']
+        
+    return final_moods, list(excluded_genres)
+
+def get_recommendations_by_mood(moods, df, excluded_genres=None):
     genre_map = {
         "happy": ["Comedy", "Romance"], "excited": ["Action", "Thriller"], "sad": ["Drama"],
         "scared": ["Horror", "Mystery"], "romantic": ["Romance"], "thoughtful": ["Documentary", "History"]
@@ -79,7 +90,14 @@ def get_recommendations_by_mood(moods, df):
     target_genres = set(g for m in moods for g in genre_map.get(m, []))
     if not target_genres: 
         return pd.DataFrame()
-    recs = df[df['genres'].apply(lambda x: not target_genres.isdisjoint(x))]
+        
+    # Get all candidate movies that have at least one of the desired genres
+    recs = df[df['genres'].apply(lambda movie_genres: not target_genres.isdisjoint(movie_genres))]
+    
+    # Now, filter out any movies that have one of the excluded genres
+    if excluded_genres:
+        recs = recs[recs['genres'].apply(lambda movie_genres: set(movie_genres).isdisjoint(set(excluded_genres)))]
+        
     return recs.nlargest(3, 'vote_count')
 
 def get_recommendations_by_person(name, df):
@@ -202,8 +220,8 @@ def main():
                     recs = get_recommendations_by_person(intent['entity'], df)
                     message = f"Top movies featuring **{intent['entity']}**:"
                 elif intent['type'] == 'mood':
-                    moods = predict_moods_from_text(intent['entity'], sentiment_model)
-                    recs = get_recommendations_by_mood(moods, df)
+                    moods, excluded_genres = predict_moods_from_text(intent['entity'], sentiment_model)
+                    recs = get_recommendations_by_mood(moods, df, excluded_genres)
                     message = f"Here are some **{' and '.join(moods)}** movies for you:"
 
                 display_recs(recs, message, context_key="new_rec")
@@ -216,3 +234,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
