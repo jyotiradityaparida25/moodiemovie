@@ -13,14 +13,17 @@ def load_data():
         df = pd.read_csv('moodie_movie_data.csv.xz')
         for col in ['genres', 'cast', 'director']:
             df[col] = df[col].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else [])
+        
         df['overview'] = df['overview'].fillna('')
         df['soup'] = df.apply(lambda x: ' '.join(x['genres']) + ' ' + ' '.join(x['cast']) + ' ' + ' '.join(x['director']) + ' ' + x['overview'], axis=1)
+
         tfidf = TfidfVectorizer(stop_words='english')
         tfidf_matrix = tfidf.fit_transform(df['soup']).astype('float32')
+        
         indices = pd.Series(df.index, index=df['title'])
         return df, tfidf_matrix, indices
     except FileNotFoundError:
-        st.error("Error: `moodie_movie_data.csv.xz` not found. Please ensure it's in your project folder.")
+        st.error("Error: `moodie_movie_data.csv.xz` not found. Please make sure it's in your project folder and uploaded to GitHub.")
         return None, None, None
     except Exception as e:
         st.error(f"An error occurred during data loading: {e}")
@@ -53,11 +56,13 @@ def predict_moods_from_text(text, model):
         "sad": ["sad", "drama", "cry", "emotional"]
     }
     negations = [r'\bnot\b', r'anything but', r'don\'t want', r'without']
+    
     excluded = set()
     for mood, keywords in mood_map.items():
         for keyword in keywords:
             if any(re.search(f"{pattern}.*\\b{keyword}\\b", text_lower) for pattern in negations):
                 excluded.add(mood)
+
     for mood, keywords in mood_map.items():
         if any(keyword in text_lower for keyword in keywords):
             detected.add(mood)
@@ -75,10 +80,6 @@ def get_recommendations_by_mood(moods, df):
     if not target_genres: 
         return pd.DataFrame()
     recs = df[df['genres'].apply(lambda x: not target_genres.isdisjoint(x))]
-    if "happy" in moods and "scared" not in moods:
-        recs = recs[~recs['genres'].apply(lambda x: 'Horror' in x)]
-    if "scared" in moods and "happy" not in moods:
-        recs = recs[~recs['genres'].apply(lambda x: 'Comedy' in x)]
     return recs.nlargest(3, 'vote_count')
 
 def get_recommendations_by_person(name, df):
@@ -127,72 +128,72 @@ def display_recs(recs, message="", context_key=""):
                 st.markdown("**Overview:**")
                 st.write(movie['overview'])
                 if st.button("More like this", key=f"{context_key}_{i}_{movie['id']}"):
-                    st.session_state.run_similar = movie['title']
-                    st.rerun()
+                    st.session_state.run_similar_for = movie['title']
 
-setup_page()
-st.title("🤖 MoodieMovie")
+def main():
+    setup_page()
+    st.title("🤖 MoodieMovie")
 
-df, tfidf_matrix, indices = load_data()
-if df is None:
-    st.stop()
-sentiment_model = get_model()
+    df, tfidf_matrix, indices = load_data()
+    if df is None:
+        st.stop()
+    sentiment_model = get_model()
 
-if 'messages' not in st.session_state:
-    st.session_state.messages = [{"role": "assistant", "content": "Hi! How are you feeling, or what are you looking for?"}]
-if 'run_similar' not in st.session_state:
-    st.session_state.run_similar = None
-if 'last_input' not in st.session_state:
-    st.session_state.last_input = ""
-
-with st.sidebar:
-    st.title("About MoodieMovie")
-    if df is not None:
-        st.write(f"Loaded **{df['title'].nunique()}** unique movies.")
-    if st.button("Clear Conversation"):
+    if 'messages' not in st.session_state:
         st.session_state.messages = [{"role": "assistant", "content": "Hi! How are you feeling, or what are you looking for?"}]
-        st.session_state.run_similar = None
-        st.session_state.last_input = ""
-        st.rerun()
+    if 'run_similar_for' not in st.session_state:
+        st.session_state.run_similar_for = None
+
+    with st.sidebar:
+        st.title("About MoodieMovie")
+        if df is not None:
+            st.write(f"Loaded **{df['title'].nunique()}** unique movies.")
+        if st.button("Clear Conversation"):
+            st.session_state.messages = [{"role": "assistant", "content": "Hi! How are you feeling, or what are you looking for?"}]
+            st.session_state.run_similar_for = None
+            st.rerun()
+        with st.expander("📖 How to Use"):
+            st.markdown("""
+            **1. Search by Mood**
+            - *"I want a funny movie"*
+            - *"a thriller but not horror"*
+            **2. Search by Title/Person**
+            - *"The Dark Knight"*
+            - *"movies starring Tom Hanks"*
+            **3. Discover Similar Movies**
+            Click the **"More like this"** button.
+            """)
+
+    for i, msg in enumerate(st.session_state.messages):
+        with st.chat_message(msg["role"]):
+            st.write(msg["content"])
+            if "recommendations" in msg:
+                display_recs(pd.DataFrame(msg["recommendations"]), context_key=f"msg_{i}")
+
+    if st.session_state.run_similar_for:
+        title_to_match = st.session_state.run_similar_for
+        st.session_state.run_similar_for = None
         
-    with st.expander("📖 How to Use"):
-        st.markdown("""
-        **1. Search by Mood**
-        - *"I want a funny movie"*
-        - *"a thriller but not horror"*
-        **2. Search by Title/Person**
-        - *"The Dark Knight"*
-        - *"movies starring Tom Hanks"*
-        **3. Discover Similar Movies**
-        Click the **"More like this"** button on any movie.
-        """)
+        user_msg = {"role": "user", "content": f"Show me movies similar to '{title_to_match}'."}
+        st.session_state.messages.append(user_msg)
+        
+        with st.chat_message("assistant"):
+            with st.spinner(f"Finding movies like '{title_to_match}'..."):
+                recs = get_similar_content(title_to_match, df, tfidf_matrix, indices)
+                message = f"If you liked **{title_to_match}**, you might also like:"
+                display_recs(recs, message, context_key="similar_rec")
+                
+                bot_msg = {"role": "assistant", "content": message, "recommendations": recs.to_dict('records')}
+                st.session_state.messages.append(bot_msg)
+        st.rerun()
 
-for i, msg in enumerate(st.session_state.messages):
-    with st.chat_message(msg["role"]):
-        st.write(msg["content"])
-        if "recommendations" in msg:
-            display_recs(pd.DataFrame(msg["recommendations"]), context_key=f"msg_{i}")
-
-if st.session_state.run_similar:
-    title_to_match = st.session_state.run_similar
-    st.session_state.run_similar = None
-    st.session_state.messages.append({"role": "user", "content": f"Show me movies similar to '{title_to_match}'."})
-    st.rerun()
-
-user_input = st.chat_input("What would you like to watch?")
-
-# --- CORRECTED LOGIC ---
-if user_input:
-    # Check if the new input is different from the last one we processed
-    if st.session_state.last_input != user_input:
-        st.session_state.last_input = user_input
+    elif user_input := st.chat_input("What would you like to watch?"):
         st.session_state.messages.append({"role": "user", "content": user_input})
         
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
                 intent = get_user_intent(user_input, indices.index)
-                recs = pd.DataFrame()
-                message = ""
+                recs, message = pd.DataFrame(), ""
 
                 if intent['type'] == 'title':
                     recs = df[df['title'] == intent['entity']]
@@ -212,3 +213,6 @@ if user_input:
                     bot_msg["recommendations"] = recs.to_dict('records')
                 st.session_state.messages.append(bot_msg)
         st.rerun()
+
+if __name__ == "__main__":
+    main()
