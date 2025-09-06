@@ -6,4 +6,7 @@ scikit-learn
 thefuzz
 python-levenshtein
 gdown
+requests
+
+
 
