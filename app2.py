@@ -15,7 +15,6 @@ def load_and_prepare_data():
     try:
         df = pd.read_csv('moodie_movie_data.csv.xz')
         
-        # Ensure all list-like columns are properly parsed
         for col in ['genres', 'cast', 'director']:
             df[col] = df[col].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else [])
         
@@ -129,7 +128,7 @@ def get_content_recommendations(title, df, tfidf_matrix, indices):
     return df.iloc[movie_indices]
 
 def setup_page_config_and_styles():
-    st.set_page_config(page_title="CineBot AI", page_icon="🤖", layout="wide")
+    st.set_page_config(page_title="MoodieMovie", page_icon="🤖", layout="wide")
     st.markdown("""
         <style>
             .stApp { background-color: #1a1a2e; color: #e0e0e0; }
@@ -139,7 +138,7 @@ def setup_page_config_and_styles():
         </style>
     """, unsafe_allow_html=True)
 
-def display_movies(movies_df, message=""):
+def display_movies(movies_df, message="", context_key=""):
     if movies_df.empty:
         st.warning("Sorry, I couldn't find any movies that fit that request.")
         return
@@ -155,7 +154,7 @@ def display_movies(movies_df, message=""):
             with col2:
                 st.markdown("**Overview:**")
                 st.write(movie['overview'])
-                if st.button("More like this", key=f"more_{movie['id']}"):
+                if st.button("More like this", key=f"more_{context_key}_{movie['id']}"):
                     st.session_state.run_more_like_this = movie['title']
                     st.rerun()
 
@@ -188,11 +187,11 @@ def main():
             **2. Discover Similar Movies**
             After getting a recommendation, click the **"More like this"** button to find movies with a similar theme and style.
             """)
-    for msg in st.session_state.messages:
+    for i, msg in enumerate(st.session_state.messages):
         with st.chat_message(msg["role"]):
             st.write(msg["content"])
             if "recommendations" in msg:
-                display_movies(pd.DataFrame(msg["recommendations"]))
+                display_movies(pd.DataFrame(msg["recommendations"]), context_key=f"msg_{i}")
     if st.session_state.run_more_like_this:
         title_to_match = st.session_state.run_more_like_this
         st.session_state.run_more_like_this = None
@@ -202,7 +201,7 @@ def main():
             with st.spinner(f"Finding movies like '{title_to_match}'..."):
                 recs = get_content_recommendations(title_to_match, df, tfidf_matrix, indices)
                 message = f"If you liked {title_to_match}, you might also like:"
-                display_movies(recs, message)
+                display_movies(recs, message, context_key="similar")
                 bot_msg = {"role": "assistant", "content": message, "recommendations": recs.to_dict('records')}
                 st.session_state.messages.append(bot_msg)
         st.rerun()
@@ -224,11 +223,12 @@ def main():
                     moods, excluded_genres = predict_moods(intent['entity'], sentiment_pipeline)
                     recs_df = get_mood_recommendations(moods, df, excluded_genres)
                     message = f"Here are some **{' and '.join(moods)}** movies for you:"
-                display_movies(recs_df, message)
+                display_movies(recs_df, message, context_key="new_search")
                 bot_msg = {"role": "assistant", "content": message}
                 if not recs_df.empty:
                     bot_msg["recommendations"] = recs_df.to_dict('records')
                 st.session_state.messages.append(bot_msg)
+                st.rerun()
 
 if __name__ == "__main__":
     main()
