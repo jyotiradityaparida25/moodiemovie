@@ -1,14 +1,11 @@
 import streamlit as st
 import pandas as pd
-import time
 import ast
 import re
 from transformers import pipeline
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from thefuzz import process
-
-POSTER_BASE_URL = "https://image.tmdb.org/t/p/w500"
 
 @st.cache_data
 def load_data():
@@ -105,14 +102,13 @@ def setup_page():
         </style>
     """, unsafe_allow_html=True)
 
-# --- FIX 1: Add a 'context_key' parameter to the display function ---
 def display_recs(recs, message="", context_key=""):
     if recs.empty:
         st.warning("Sorry, couldn't find any movies for that.")
         return
 
     st.subheader(message)
-    for _, movie in recs.iterrows():
+    for i, (_, movie) in enumerate(recs.iterrows()):
         with st.expander(f"**{movie['title']}**"):
             col1, col2 = st.columns([1, 2])
             with col1:
@@ -123,8 +119,7 @@ def display_recs(recs, message="", context_key=""):
             with col2:
                 st.markdown("**Overview:**")
                 st.write(movie['overview'])
-                # --- FIX 2: Add the context_key prefix to the button key ---
-                if st.button("More like this", key=f"{context_key}_more_{movie['id']}"):
+                if st.button("More like this", key=f"{context_key}_{i}_{movie['id']}"):
                     st.session_state.run_similar = movie['title']
                     st.rerun()
 
@@ -147,6 +142,7 @@ with st.sidebar:
         st.write(f"Loaded **{df['title'].nunique()}** unique movies.")
     if st.button("Clear Conversation"):
         st.session_state.messages = [{"role": "assistant", "content": "Hi! How are you feeling, or what are you looking for?"}]
+        st.session_state.run_similar = None
         st.rerun()
         
     with st.expander("📖 How to Use"):
@@ -161,21 +157,26 @@ with st.sidebar:
         Click the **"More like this"** button on any movie.
         """)
 
-# --- FIX 3: Use enumerate to get the index of each message ---
 for i, msg in enumerate(st.session_state.messages):
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
         if "recommendations" in msg:
-            # --- FIX 4: Pass the message index as part of the context_key ---
             display_recs(pd.DataFrame(msg["recommendations"]), context_key=f"msg_{i}")
 
 if st.session_state.run_similar:
-    similar_to_title = st.session_state.run_similar
+    title_to_match = st.session_state.run_similar
     st.session_state.run_similar = None
     
-    st.session_state.messages.append({"role": "user", "content": f"Show me movies like '{similar_to_title}'."})
+    st.session_state.messages.append({"role": "user", "content": f"Show me movies similar to '{title_to_match}'."})
     
-    # Rerun to display the user message immediately
+    with st.chat_message("assistant"):
+        with st.spinner(f"Finding movies like '{title_to_match}'..."):
+            recs = get_similar_content(title_to_match, df, tfidf_matrix, indices)
+            message = f"If you liked {title_to_match}, you might also like:"
+            display_recs(recs, message, context_key="similar_rec")
+            
+            bot_msg = {"role": "assistant", "content": message, "recommendations": recs.to_dict('records')}
+            st.session_state.messages.append(bot_msg)
     st.rerun()
 
 user_input = st.chat_input("What would you like to watch?")
@@ -199,13 +200,10 @@ if user_input:
                 recs = get_recommendations_by_mood(moods, df)
                 message = f"Here are some **{' and '.join(moods)}** movies for you:"
 
-            # --- FIX 5: Use a unique context for newly generated recommendations ---
             display_recs(recs, message, context_key="new_rec")
             
             bot_msg = {"role": "assistant", "content": message}
             if not recs.empty:
                 bot_msg["recommendations"] = recs.to_dict('records')
             st.session_state.messages.append(bot_msg)
-    
-    # Rerun to clear the "More like this" state if necessary and show the new message
     st.rerun()
