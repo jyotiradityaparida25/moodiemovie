@@ -3,6 +3,8 @@ import pandas as pd
 import time
 import ast
 import re
+import gdown
+import os
 from transformers import pipeline
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -13,34 +15,26 @@ POSTER_BASE_URL = "https://image.tmdb.org/t/p/w500"
 @st.cache_data
 def load_data():
     try:
-        meta = pd.read_csv('movies_metadata.csv', low_memory=False)
-        credits = pd.read_csv('credits.csv')
-
-        meta = meta[meta['id'].str.isnumeric()]
-        meta['id'] = meta['id'].astype(int)
+        # --- This section now downloads the data file from Google Drive ---
+        file_id = "1Y21QmuDPav7AXGTqmPt0bcF1rbM_JIh5" # Your specific Google Drive File ID
+        file_name = "processed_movies.csv"
         
-        meta['vote_count'] = pd.to_numeric(meta['vote_count'], errors='coerce').fillna(0)
-        merged_df = pd.merge(meta, credits, on='id')
+        if not os.path.exists(file_name):
+            with st.spinner(f"Downloading data file ({file_name})... This may take a moment on the first run."):
+                gdown.download(id=file_id, output=file_name, quiet=False)
         
-        df = merged_df[merged_df['vote_count'] >= 100].copy()
+        # Now, load the locally downloaded file
+        df = pd.read_csv(file_name)
 
         def safe_eval(s):
             try: return ast.literal_eval(s)
             except: return []
 
-        df['genres'] = df['genres'].apply(lambda x: [i['name'] for i in safe_eval(x)])
-        df['cast'] = df['cast'].apply(lambda x: [i['name'] for i in safe_eval(x)[:3]])
+        df['genres'] = df['genres'].apply(lambda x: safe_eval(x) if isinstance(x, str) else [])
+        df['cast'] = df['cast'].apply(lambda x: safe_eval(x) if isinstance(x, str) else [])
+        df['director'] = df['director'].apply(lambda x: safe_eval(x) if isinstance(x, str) else [])
 
-        def get_director(crew_data):
-            for member in safe_eval(crew_data):
-                if member['job'] == 'Director':
-                    return [member['name']]
-            return []
-        df['director'] = df['crew'].apply(get_director)
-
-        df = df[['id', 'title', 'overview', 'genres', 'cast', 'director', 'poster_path', 'vote_average', 'vote_count']]
         df['overview'] = df['overview'].fillna('')
-        df.dropna(subset=['title', 'poster_path'], inplace=True)
 
         df['soup'] = df.apply(lambda x: ' '.join(x['genres']) + ' ' + ' '.join(x['cast']) + ' ' + ' '.join(x['director']) + ' ' + x['overview'], axis=1)
 
@@ -51,9 +45,6 @@ def load_data():
 
         return df, tfidf_matrix, indices
 
-    except FileNotFoundError as e:
-        st.error(f"Error: Missing data file `{e.filename}`. Please make sure it's in the folder.")
-        return None, None, None
     except Exception as e:
         st.error(f"An error occurred during data loading: {e}")
         return None, None, None
@@ -174,6 +165,8 @@ setup_page()
 st.title("🤖 MoodieMovie")
 
 df, tfidf_matrix, indices = load_data()
+if df is None:
+    st.stop()
 sentiment_model = get_model()
 
 if 'messages' not in st.session_state:
