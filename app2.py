@@ -78,32 +78,34 @@ def get_recommendations_by_mood(moods, df, excluded_genres=None):
         "happy": ["Comedy", "Romance"], "excited": ["Action", "Thriller"], "sad": ["Drama"],
         "scared": ["Horror", "Mystery"], "romantic": ["Romance"], "thoughtful": ["Documentary", "History"]
     }
-    positive_genres = set(g for m in moods for g in genre_map.get(m, []))
+    required_genres = set(g for m in moods for g in genre_map.get(m, []))
     forbidden_genres = set(excluded_genres) if excluded_genres else set()
-    required_genres = positive_genres - forbidden_genres
+    
     if not required_genres:
         return pd.DataFrame()
-    def is_valid_movie(movie_genres):
-        movie_genre_set = set(movie_genres)
-        has_required = not movie_genre_set.isdisjoint(required_genres)
-        has_forbidden = not movie_genre_set.isdisjoint(forbidden_genres)
-        return has_required and not has_forbidden
-    recs = df[df['genres'].apply(is_valid_movie)]
+    
+    recs = df[
+        df['genres'].apply(lambda x: not set(x).isdisjoint(required_genres)) &
+        df['genres'].apply(lambda x: set(x).isdisjoint(forbidden_genres))
+    ]
     return recs.nlargest(3, 'vote_count')
 
 def get_recommendations_by_person(name, df):
-    name_lower = name.lower()
-    is_actor = df['cast'].apply(lambda x: name_lower in [a.lower() for a in x])
-    is_director = df['director'].apply(lambda x: name_lower in [d.lower() for d in x])
+    names_lower = [n.strip().lower() for n in name.split(',')]
+    is_actor = df['cast'].apply(lambda x: any(n in [a.lower() for a in x] for n in names_lower))
+    is_director = df['director'].apply(lambda x: any(n in [d.lower() for d in x] for n in names_lower))
     recs = df[is_actor | is_director]
     return recs.nlargest(5, 'vote_count')
 
 def get_similar_content(title, df, matrix, indices):
-    if title not in indices: 
+    if title not in indices.index: 
         return pd.DataFrame()
+    
     lookup = indices[title]
     idx = lookup.iloc[0] if isinstance(lookup, pd.Series) else lookup
+    
     if idx >= matrix.shape[0]: return pd.DataFrame()
+    
     sim_scores = cosine_similarity(matrix[idx], matrix)
     sim_scores = sorted(list(enumerate(sim_scores[0])), key=lambda x: x[1], reverse=True)[1:6]
     movie_indices = [i[0] for i in sim_scores]
