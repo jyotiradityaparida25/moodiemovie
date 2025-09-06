@@ -16,7 +16,7 @@ POSTER_BASE_URL = "https://image.tmdb.org/t/p/w500"
 def load_data():
     try:
         # --- This section now downloads the data file from Google Drive ---
-        file_id = "1Y21QmuDPav7AXGTqmPt0bcF1rbM_JIh5" # Your specific Google Drive File ID
+        file_id = "1e1ByfFfyFssE-sGnqFjGQDFPQUT1ayP_" # Your NEW, specific Google Drive File ID
         file_name = "processed_movies.csv"
         
         if not os.path.exists(file_name):
@@ -26,6 +26,7 @@ def load_data():
         # Now, load the locally downloaded file
         df = pd.read_csv(file_name)
 
+        # Safely evaluate string representations of lists
         def safe_eval(s):
             try: return ast.literal_eval(s)
             except: return []
@@ -36,6 +37,7 @@ def load_data():
 
         df['overview'] = df['overview'].fillna('')
 
+        # Create the 'soup' for NLP processing
         df['soup'] = df.apply(lambda x: ' '.join(x['genres']) + ' ' + ' '.join(x['cast']) + ' ' + ' '.join(x['director']) + ' ' + x['overview'], axis=1)
 
         tfidf = TfidfVectorizer(stop_words='english')
@@ -187,10 +189,8 @@ with st.sidebar:
         **1. Search by Mood**
         - *"I want a funny movie"*
         - *"a thriller but not horror"*
-        **2. Search by Title/Person**
-        - *"The Dark Knight"*
-        - *"movies starring Tom Hanks"*
-        **3. Discover Similar Movies**
+        
+        **2. Discover Similar Movies**
         Click the **"More like this"** button on any movie.
         """)
 
