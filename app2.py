@@ -13,41 +13,26 @@ POSTER_BASE_URL = "https://image.tmdb.org/t/p/w500"
 @st.cache_data
 def load_and_prepare_data():
     try:
-        meta_df = pd.read_csv('movies_metadata.csv', low_memory=False)
-        credits_df = pd.read_csv('credits.csv')
-        meta_df = meta_df[meta_df['id'].str.isnumeric()]
-        meta_df['id'] = meta_df['id'].astype(int)
-        meta_df['vote_count'] = pd.to_numeric(meta_df['vote_count'], errors='coerce').fillna(0)
-        df_full = pd.merge(meta_df, credits_df, on='id')
-        df = df_full[df_full['vote_count'] >= 100].copy() 
-
-        def safe_literal_eval(s):
-            try: return ast.literal_eval(s)
-            except: return []
-
-        df['genres'] = df['genres'].apply(lambda x: [i['name'] for i in safe_literal_eval(x)])
-        df['cast'] = df['cast'].apply(lambda x: [i['name'] for i in safe_literal_eval(x)[:3]])
-
-        def get_director(crew):
-            for member in safe_literal_eval(crew):
-                if member['job'] == 'Director':
-                    return [member['name']]
-            return []
-        df['director'] = df['crew'].apply(get_director)
-
-        df = df[['id', 'title', 'overview', 'genres', 'cast', 'director', 'poster_path', 'vote_average', 'vote_count']]
+        df = pd.read_csv('moodie_movie_data.csv.xz')
+        
+        # Ensure all list-like columns are properly parsed
+        for col in ['genres', 'cast', 'director']:
+            df[col] = df[col].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else [])
+        
         df['overview'] = df['overview'].fillna('')
-        df.dropna(subset=['title', 'poster_path'], inplace=True)
+        df.dropna(subset=['title'], inplace=True)
+        
         df['soup'] = df.apply(lambda x: ' '.join(x['genres']) + ' ' + ' '.join(x['cast']) + ' ' + ' '.join(x['director']) + ' ' + x['overview'], axis=1)
-
+        
         tfidf = TfidfVectorizer(stop_words='english')
         tfidf_matrix = tfidf.fit_transform(df['soup']).astype('float32')
+        
         indices = pd.Series(df.index, index=df['title'])
 
         return df, tfidf_matrix, indices
 
     except FileNotFoundError as e:
-        st.error(f"Error: A required data file was not found. Please check for `{e.filename}`.")
+        st.error(f"Error: A required data file was not found. Please check for `moodie_movie_data.csv.xz` in the correct directory.")
         return None, None, None
     except Exception as e:
         st.error(f"An error occurred during data loading: {e}")
@@ -85,14 +70,12 @@ def predict_moods(text, sentiment_pipeline):
     
     negation_patterns = [r'\bnot\b', r'\bbut not\b', r'anything but', r'don\'t want', r'without']
 
-    # First, detect negated genres
     for mood, data in mood_to_genre.items():
         for keyword in data["keywords"]:
             if any(re.search(f"{pattern}.*\\b{keyword}\\b", text_lower) for pattern in negation_patterns):
                 for genre in data["genres"]:
                     excluded_genres.add(genre)
 
-    # Then, detect desired moods
     for mood, data in mood_to_genre.items():
         if any(keyword in text_lower for keyword in data["keywords"]):
             detected_moods.add(mood)
